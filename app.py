@@ -66,7 +66,13 @@ def speak_text_async(text):
     t.start()
 
 # 4. 웹캠 실행 및 스페이스바 수동 측정 루프
-cap = cv2.VideoCapture(0)
+# 기존 (노트북 내장 웹캠)
+# cap = cv2.VideoCapture(0)
+
+# 수정 (ESP32-S3 무선 스트리밍 주소)
+stream_url = "http://172.28.26.178:81/stream"
+cap = cv2.VideoCapture(stream_url)
+
 MATCH_THRESHOLD = 30  # 매칭 기준점 개수
 last_detected_info = "Press SPACE to Scan Target"
 
