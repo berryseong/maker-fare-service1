@@ -61,9 +61,16 @@ def run_tts_in_thread(text):
     asyncio.run(_speak())
     is_speaking = False
 
-def speak_text_async(text):
-    t = threading.Thread(target=run_tts_in_thread, args=(text,), daemon=True)
-    t.start()
+def speak_text_async(char_key):
+    def _play():
+        file_path = os.path.join("assets", "audio", f"{char_key}.mp3")
+        if os.path.exists(file_path):
+            pygame.mixer.music.load(file_path)
+            pygame.mixer.music.play()
+        else:
+            print(f"[경고] {file_path} 음성 파일이 존재하지 않습니다.")
+
+    threading.Thread(target=_play, daemon=True).start()
 
 # 4. 웹캠 실행 및 스페이스바 수동 측정 루프
 # 기존 (노트북 내장 웹캠)
