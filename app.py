@@ -74,11 +74,11 @@ def speak_text_async(char_key):
 
 # 4. 웹캠 실행 및 스페이스바 수동 측정 루프
 # 기존 (노트북 내장 웹캠)
-# cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0)
 
 # 수정 (ESP32-S3 무선 스트리밍 주소)
-stream_url = "http://172.28.26.178:81/stream"
-cap = cv2.VideoCapture(stream_url)
+# stream_url = "http://172.28.26.178:81/stream"
+# cap = cv2.VideoCapture(stream_url)
 
 MATCH_THRESHOLD = 30  # 매칭 기준점 개수
 last_detected_info = "Press SPACE to Scan Target"
@@ -124,7 +124,7 @@ try:
                     char_data = character_db[best_match_char]
                     last_detected_info = f"{char_data['name']} | POWER: {char_data['power']}"
                     print(f"[측정 성공] {char_data['name']} (전투력: {char_data['power']})")
-                    speak_text_async(char_data["tts_text"])
+                    speak_text_async(best_match_char)
                 else:
                     last_detected_info = "TARGET NOT FOUND"
                     print("[측정 실패] 인식된 캐릭터 카드가 없습니다.")
