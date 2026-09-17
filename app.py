@@ -5,12 +5,77 @@ import asyncio
 import edge_tts
 import pygame
 import threading
+import time
+import requests
+import numpy as np
 
 # 1. 오디오 시스템 및 캐릭터 DB 로드
 pygame.mixer.init()
 
 with open("characters.json", "r", encoding="utf-8") as f:
     character_db = json.load(f)
+
+
+class MJPEGStream:
+    """백그라운드 스레드에서 계속 프레임을 받아 최신 프레임만 보관.
+    메인 루프의 read()는 네트워크 상태와 무관하게 즉시 반환되므로
+    화면(cv2.imshow)이나 키 입력(waitKey)이 멈추지 않는다."""
+
+    def __init__(self, url, timeout=5, reconnect_delay=1.0):
+        self.url = url
+        self.timeout = timeout
+        self.reconnect_delay = reconnect_delay
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.thread = threading.Thread(target=self._update, daemon=True)
+        self.thread.start()
+
+    def _update(self):
+        while self.running:
+            buf = b""
+            try:
+                resp = requests.get(self.url, stream=True, timeout=self.timeout)
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if not self.running:
+                        break
+                    if not chunk:
+                        continue
+                    buf += chunk
+
+                    start = buf.find(b'\xff\xd8')  # JPEG 시작
+                    end = buf.find(b'\xff\xd9')    # JPEG 끝
+                    if start != -1 and end != -1 and end > start:
+                        jpg = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with self.lock:
+                                self.frame = frame
+                    elif start == -1:
+                        # 시작 마커가 없는 쓰레기 데이터는 버림 (버퍼 무한 증가 방지)
+                        buf = buf[-2:]
+                resp.close()
+            except (requests.exceptions.RequestException, ConnectionError, OSError) as e:
+                print(f"[스트림] 연결 끊김, {self.reconnect_delay}초 후 재연결 시도... ({e})")
+            except Exception as e:
+                print(f"[스트림] 알 수 없는 오류: {e}")
+
+            if self.running:
+                time.sleep(self.reconnect_delay)
+
+    def isOpened(self):
+        return self.running
+
+    def read(self):
+        with self.lock:
+            if self.frame is None:
+                return False, None
+            return True, self.frame.copy()
+
+    def release(self):
+        self.running = False
+
 
 # 2. ORB 특징점 검출기 설정
 orb = cv2.ORB_create(nfeatures=1500)
@@ -40,16 +105,17 @@ print(f"총 {len(ref_features)}개의 이미지 특징점 로딩 완료!\n")
 
 is_speaking = False
 
+
 # 백그라운드 음성 출력 함수 (화면 멈춤 방지)
 def run_tts_in_thread(text):
     global is_speaking
     is_speaking = True
-    
+
     async def _speak():
         file_path = "temp_speak.mp3"
         communicate = edge_tts.Communicate(text, "ko-KR-InJoonNeural")
         await communicate.save(file_path)
-        
+
         pygame.mixer.music.load(file_path)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
@@ -57,9 +123,10 @@ def run_tts_in_thread(text):
         pygame.mixer.music.unload()
         if os.path.exists(file_path):
             os.remove(file_path)
-            
+
     asyncio.run(_speak())
     is_speaking = False
+
 
 def speak_text_async(char_key):
     def _play():
@@ -72,13 +139,14 @@ def speak_text_async(char_key):
 
     threading.Thread(target=_play, daemon=True).start()
 
+
 # 4. 웹캠 실행 및 스페이스바 수동 측정 루프
 # 기존 (노트북 내장 웹캠)
-cap = cv2.VideoCapture(0)
+# cap = cv2.VideoCapture(0)
 
 # 수정 (ESP32-S3 무선 스트리밍 주소)
-# stream_url = "http://172.28.26.178:81/stream"
-# cap = cv2.VideoCapture(stream_url)
+stream_url = "http://192.168.1.50:81/stream"
+cap = MJPEGStream(stream_url)
 
 MATCH_THRESHOLD = 30  # 매칭 기준점 개수
 last_detected_info = "Press SPACE to Scan Target"
@@ -89,10 +157,14 @@ print("카메라 창을 클릭한 뒤 [SPACE]를 누르면 측정을 시작합�
 try:
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret:
-            break
 
         key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+
+        if not ret:
+            # 아직 첫 프레임을 못 받았거나 재연결 중 -> 루프는 계속 돌되 이번 프레임만 스킵
+            continue
 
         # 스페이스바(Space) 입력 시 측정 실행
         if key == ord(' '):
@@ -130,18 +202,15 @@ try:
                     print("[측정 실패] 인식된 캐릭터 카드가 없습니다.")
 
         # HUD UI 화면 표시
-        cv2.putText(frame, "Press 'SPACE': Scan | Press 'q': Quit", (20, 30), 
+        cv2.putText(frame, "Press 'SPACE': Scan | Press 'q': Quit", (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
+
         # 측정 결과에 따라 텍스트 색상 변경 (인식 성공: 녹색, 실패: 빨간색)
         status_color = (0, 255, 0) if "POWER" in last_detected_info else (0, 0, 255)
-        cv2.putText(frame, f"STATUS: {last_detected_info}", (20, 70), 
+        cv2.putText(frame, f"STATUS: {last_detected_info}", (20, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
 
         cv2.imshow("Dragon Ball Scouter - Service 1", frame)
-
-        if key == ord('q'):
-            break
 
 except KeyboardInterrupt:
     print("\n[알림] 사용자에 의해 스카우터 프로그램이 종료되었습니다.")
