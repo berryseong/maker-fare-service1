@@ -8,6 +8,7 @@ import threading
 import time
 import requests
 import numpy as np
+import textwrap
 from scouter_overlay import draw_scouter_overlay
 from PIL import ImageFont, ImageDraw, Image
 
@@ -141,42 +142,79 @@ def speak_text_async(char_key):
 
     threading.Thread(target=_play, daemon=True).start()
 
-def draw_korean_text_centered(img, text, y_pos, font_size, color_bgr):
-    """Pillow를 이용해 한글 텍스트를 화면 가운데 정렬하여 그려주는 함수"""
-    img_pil = Image.fromarray(img)
-    draw = ImageDraw.Draw(img_pil)
+# --- 한글 UI 캐싱 렌더링 함수 ---
+ui_overlay_cache = None
+last_char_name = None
+
+def draw_fast_korean_ui(frame, char_data):
+    global ui_overlay_cache, last_char_name
     
-    try:
-        font = ImageFont.truetype("malgun.ttf", font_size) # 윈도우 맑은 고딕
-    except:
-        font = ImageFont.load_default()
+    # 캐릭터가 바뀔 때만 딱 1번 투명 이미지 생성 (렉 발생 원천 차단)
+    if last_char_name != char_data['name']:
+        img_pil = Image.new("RGBA", (frame.shape[1], frame.shape[0]), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img_pil)
         
-    color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0]) # BGR -> RGB
-    
-    try:
-        text_bbox = font.getbbox(text)
-        text_width = text_bbox[2] - text_bbox[0]
-    except:
-        text_width = draw.textlength(text, font=font)
+        # 1. 상단용(24pt) 및 하단 설명용(18pt) Bold 폰트 각각 생성
+        try:
+            font_large = ImageFont.truetype("malgunbd.ttf", 24)
+            font_small = ImageFont.truetype("malgunbd.ttf", 18)
+        except:
+            try:
+                font_large = ImageFont.truetype("malgun.ttf", 24)
+                font_small = ImageFont.truetype("malgun.ttf", 18)
+            except:
+                font_large = ImageFont.load_default()
+                font_small = ImageFont.load_default()
+            
+        color_bgra = (0, 215, 255, 255) # 노란색 (BGR 기준)
         
-    x_pos = (img.shape[1] - text_width) // 2
-    draw.text((x_pos, y_pos), text, font=font, fill=color_rgb)
-    
-    return np.array(img_pil)
+        def draw_centered(text, y_pos, font):
+            try:
+                w = draw.textlength(text, font=font)
+            except AttributeError:
+                w = font.getbbox(text)[2] - font.getbbox(text)[0]
+            x = (frame.shape[1] - int(w)) // 2
+            draw.text((x, y_pos), text, font=font, fill=color_bgra)
+            
+        # 2. 최상단 배치 (큰 폰트 24pt 적용)
+        draw_centered(f"이름: {char_data['name']}", 15, font_large)
+        draw_centered(f"전투력 : {char_data['power']}", 45, font_large)
+        
+        # 3. 하단 설명 텍스트 (줄당 글자 수를 32자로 늘려 가로 폭 넓게 활용 & 작은 폰트 18pt 적용)
+        desc_text = char_data['tts_text']
+        lines = textwrap.wrap(desc_text, width=32)
+        
+        line_height = 24  # 18pt 폰트에 맞춘 알맞은 줄간격
+        start_y = frame.shape[0] - (len(lines) * line_height + 20)
+        
+        for i, line in enumerate(lines):
+            draw_centered(line, start_y + i * line_height, font_small)
+        
+        ui_overlay_cache = np.array(img_pil)
+        last_char_name = char_data['name']
+        
+    if ui_overlay_cache is not None:
+        alpha = ui_overlay_cache[:, :, 3] / 255.0
+        for c in range(3):
+            frame[:, :, c] = (alpha * ui_overlay_cache[:, :, c] + (1 - alpha) * frame[:, :, c]).astype(np.uint8)
+            
+    return frame
 
 # 4. 웹캠 실행 및 스페이스바 수동 측정 루프
 # 기존 (노트북 내장 웹캠)
 cap = cv2.VideoCapture(0)
 
-# 수정 (ESP32-S3 무선 스트리밍 주소)
+# 수정 (ESP32-S3 무선 스트리밍 주소 사용 시)
 # stream_url = "http://192.168.1.50:81/stream"
 # cap = MJPEGStream(stream_url)
 
 MATCH_THRESHOLD = 30  # 매칭 기준점 개수
-last_detected_info = "Press SPACE to Scan Target"
+current_char_data = None
+filter_mode = 0  
+filter_colors = [None, (255, 100, 0), (0, 255, 0), (200, 50, 255), (255, 0, 150)]
 
 print("=== 스카우터 비전 인식 서비스 구동 ===")
-print("카메라 창을 클릭한 뒤 [SPACE]를 누르면 측정을 시작합니다. ('q' 또는 Ctrl+C로 종료)")
+print("카메라 창을 클릭한 뒤 [SPACE]를 누르면 측정을 시작합니다. ('t': 필터 변경, 'q': 종료)")
 
 try:
     while cap.isOpened():
@@ -185,6 +223,8 @@ try:
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
+        if key == ord('t'):
+            filter_mode = (filter_mode + 1) % 5
 
         if not ret:
             # 아직 첫 프레임을 못 받았거나 재연결 중 -> 루프는 계속 돌되 이번 프레임만 스킵
@@ -217,24 +257,24 @@ try:
                             best_match_char = ref_data["char_key"]
 
                 if best_match_char:
-                    char_data = character_db[best_match_char]
-                    last_detected_info = f"{char_data['name']} | POWER: {char_data['power']}"
-                    print(f"[측정 성공] {char_data['name']} (전투력: {char_data['power']})")
+                    current_char_data = character_db[best_match_char]
+                    print(f"[측정 성공] {current_char_data['name']} (전투력: {current_char_data['power']})")
                     speak_text_async(best_match_char)
                 else:
-                    last_detected_info = "TARGET NOT FOUND"
+                    current_char_data = None
                     print("[측정 실패] 인식된 캐릭터 카드가 없습니다.")
 
-        # HUD UI 화면 표시
-        cv2.putText(frame, "Press 'SPACE': Scan | Press 'q': Quit", (20, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        # 1. 색상 필터 적용 ('t' 키 조작 시)
+        if filter_mode > 0:
+            overlay = np.full_like(frame, filter_colors[filter_mode])
+            frame = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
 
-        # 측정 결과에 따라 텍스트 색상 변경 (인식 성공: 녹색, 실패: 빨간색)
-        status_color = (0, 255, 0) if "POWER" in last_detected_info else (0, 0, 255)
-        cv2.putText(frame, f"STATUS: {last_detected_info}", (20, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-
+        # 2. 노란색 스카우터 삼각형 오버레이
         draw_scouter_overlay(frame)
+
+        # 3. 인식된 상태일 때만 중앙에 노란 한글 UI 표시
+        if current_char_data is not None:
+            frame = draw_fast_korean_ui(frame, current_char_data)
 
         cv2.imshow("Dragon Ball Scouter - Service 1", frame)
 
