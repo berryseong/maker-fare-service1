@@ -8,6 +8,8 @@ import threading
 import time
 import requests
 import numpy as np
+from scouter_overlay import draw_scouter_overlay
+from PIL import ImageFont, ImageDraw, Image
 
 # 1. 오디오 시스템 및 캐릭터 DB 로드
 pygame.mixer.init()
@@ -139,14 +141,36 @@ def speak_text_async(char_key):
 
     threading.Thread(target=_play, daemon=True).start()
 
+def draw_korean_text_centered(img, text, y_pos, font_size, color_bgr):
+    """Pillow를 이용해 한글 텍스트를 화면 가운데 정렬하여 그려주는 함수"""
+    img_pil = Image.fromarray(img)
+    draw = ImageDraw.Draw(img_pil)
+    
+    try:
+        font = ImageFont.truetype("malgun.ttf", font_size) # 윈도우 맑은 고딕
+    except:
+        font = ImageFont.load_default()
+        
+    color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0]) # BGR -> RGB
+    
+    try:
+        text_bbox = font.getbbox(text)
+        text_width = text_bbox[2] - text_bbox[0]
+    except:
+        text_width = draw.textlength(text, font=font)
+        
+    x_pos = (img.shape[1] - text_width) // 2
+    draw.text((x_pos, y_pos), text, font=font, fill=color_rgb)
+    
+    return np.array(img_pil)
 
 # 4. 웹캠 실행 및 스페이스바 수동 측정 루프
 # 기존 (노트북 내장 웹캠)
-# cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0)
 
 # 수정 (ESP32-S3 무선 스트리밍 주소)
-stream_url = "http://192.168.1.50:81/stream"
-cap = MJPEGStream(stream_url)
+# stream_url = "http://192.168.1.50:81/stream"
+# cap = MJPEGStream(stream_url)
 
 MATCH_THRESHOLD = 30  # 매칭 기준점 개수
 last_detected_info = "Press SPACE to Scan Target"
@@ -209,6 +233,8 @@ try:
         status_color = (0, 255, 0) if "POWER" in last_detected_info else (0, 0, 255)
         cv2.putText(frame, f"STATUS: {last_detected_info}", (20, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+
+        draw_scouter_overlay(frame)
 
         cv2.imshow("Dragon Ball Scouter - Service 1", frame)
 
